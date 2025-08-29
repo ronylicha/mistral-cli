@@ -1,0 +1,8 @@
+[
+    {
+        "name": "mistral",
+        "url": "https://api.mistral.ai",
+        "api_key": "votre_clé_api",
+        "active": true
+    }
+]
