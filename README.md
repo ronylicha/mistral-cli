@@ -2,7 +2,7 @@
 
 **Outil polyvalent en ligne de commande pour interagir avec les agents Mistral AI**
 
-![Mistral CLI Demo](https://via.placeholder.com/800x400/0078D4/FFFFFF?text=Mistral+CLI)
+
 
 ---
 
@@ -82,7 +82,7 @@ python3 -m pipx ensurepath
 1. Cloner le dépôt:
 
 ```bash
-git clone https://github.com/votre-org/mistral-cli.git
+git clone https://github.com/ronylicha/mistral-cli.git
 cd mistral-cli
 ```
 
