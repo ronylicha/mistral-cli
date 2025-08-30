@@ -11,7 +11,7 @@ from rich.text import Text
 from rich.live import Live
 from rich.spinner import Spinner
 from rich.markdown import Markdown
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import requests
 from cryptography.fernet import Fernet
 import base64
@@ -61,8 +61,30 @@ class MistralAgent(BaseModel):
     id: str
     name: str
     model: str
+    agent_type: str = "model"  # "model" ou "agent"
+    description: Optional[str] = None
+    instructions: Optional[str] = None
+    tools: List[str] = []
     active: bool = True
     encrypted_api_key: Optional[str] = None  # Clé API chiffrée
+    created_at: Optional[str] = None
+    version: Optional[str] = None
+
+    @field_validator('created_at', mode='before')
+    @classmethod
+    def validate_created_at(cls, v):
+        """Convertit les timestamps Unix en chaînes."""
+        if v is None:
+            return None
+        if isinstance(v, int):
+            # Convertir le timestamp Unix en string ISO
+            return datetime.fromtimestamp(v).isoformat()
+        if isinstance(v, (str, float)):
+            # Si c'est déjà une chaîne ou un float, le convertir en string
+            if isinstance(v, float):
+                return datetime.fromtimestamp(v).isoformat()
+            return str(v)
+        return v
 
     @property
     def api_key(self) -> Optional[str]:
@@ -164,10 +186,19 @@ def install_npm_tools():
 def load_config(file_path: str, model) -> List:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            return [model(**item) for item in json.load(f)]
+            data = json.load(f)
+            agents = []
+            for item in data:
+                try:
+                    agents.append(model(**item))
+                except Exception as e:
+                    console.print(f"[dim red]Erreur lors du chargement de {item.get('id', 'inconnu')}: {e}[/dim red]")
+                    continue
+            return agents
     except FileNotFoundError:
         return []
     except json.JSONDecodeError:
+        console.print(f"[dim red]Erreur de format JSON dans {file_path}[/dim red]")
         return []
 
 def save_config(file_path: str, data: List):
@@ -193,10 +224,18 @@ class MistralChatBot:
 
     def _authenticate(self):
         """Interface d'authentification pour ajouter une clé API Mistral."""
+        auth_text = Text()
+        auth_text.append("🔐 Authentification requise\n\n", style="bold yellow")
+        auth_text.append("Pour utiliser Mistral CLI, vous devez ajouter une clé API Mistral.\n\n", style="white")
+        auth_text.append("🔗 Obtenez votre clé sur: ", style="dim")
+        auth_text.append("https://mistral.ai", style="link https://mistral.ai")
+        auth_text.append("\n\n📝 Une fois connecté, je récupérerai automatiquement vos modèles et agents.", style="dim cyan")
+        
         console.print(Panel.fit(
-            "[bold yellow]🔐 Authentification requise[/bold yellow]\n"
-            "Pour utiliser Mistral CLI, vous devez ajouter une clé API Mistral.\n"
-            "Vous pouvez en obtenir une sur [link=https://mistral.ai]https://mistral.ai[/link]."
+            auth_text,
+            title="[bold yellow]🎆 Configuration initiale[/bold yellow]",
+            border_style="yellow",
+            padding=(1, 2)
         ))
         api_key = getpass.getpass("Entrez votre clé API Mistral: ").strip()
         if not api_key:
@@ -205,42 +244,165 @@ class MistralChatBot:
 
         agents_data = self._fetch_mistral_agents(api_key)
         if not agents_data:
-            console.print("[red]❌ Impossible de récupérer les agents. Vérifiez votre clé API.[/red]")
+            error_text = Text()
+            error_text.append("❌ Impossible de récupérer les données\n\n", style="bold red")
+            error_text.append("🔍 Vérifiez votre clé API Mistral\n", style="red")
+            error_text.append("🌐 Assurez-vous d'avoir une connexion Internet\n", style="red")
+            error_text.append("💳 Vérifiez que votre compte a des crédits", style="red")
+            
+            console.print(Panel.fit(
+                error_text,
+                title="[bold red]⚠️ Erreur d'authentification[/bold red]",
+                border_style="red",
+                padding=(1, 2)
+            ))
             exit(1)
 
         self._save_agents(agents_data, api_key)
-        console.print(f"✅ {len(agents_data)} agents Mistral ajoutés.")
+        # Affichage des agents ajoutés avec style
+        models_count = len([a for a in agents_data if a.get("agent_type") == "model"])
+        agents_count = len([a for a in agents_data if a.get("agent_type") == "agent"])
+        
+        success_text = Text()
+        success_text.append("✅ ", style="green")
+        success_text.append(f"{len(agents_data)} éléments ajoutés: ", style="bold green")
+        if models_count > 0:
+            success_text.append(f"{models_count} modèles 📚", style="cyan")
+        if agents_count > 0:
+            if models_count > 0:
+                success_text.append(", ", style="white")
+            success_text.append(f"{agents_count} agents 🤖", style="magenta")
+        
+        console.print(Panel.fit(success_text, border_style="green"))
+
+        # Sélectionner automatiquement le premier modèle par défaut
+        self._auto_select_first_model()
 
         # Installer les outils npm après l'authentification
         if Confirm.ask("Souhaitez-vous installer les outils npm nécessaires ?", default=True):
             install_npm_tools()
 
     def _fetch_mistral_agents(self, api_key: str) -> List[Dict[str, Any]]:
-        """Récupère les agents depuis l'API Mistral."""
+        """Récupère les modèles et agents depuis l'API Mistral."""
+        agents_list = []
+        headers = {"Authorization": f"Bearer {api_key}"}
+        
         try:
-            headers = {"Authorization": f"Bearer {api_key}"}
+            # Récupérer les modèles disponibles
+            response = requests.get(
+                "https://api.mistral.ai/v1/models",
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            
+            try:
+                models_response = response.json()
+            except ValueError as json_err:
+                console.print(f"[red]❌ Erreur de parsing JSON pour les modèles:[/red] {json_err}")
+                models_response = []
+            
+            # Gérer les différents formats de réponse API
+            if isinstance(models_response, dict):
+                models = models_response.get("data", [])
+            elif isinstance(models_response, list):
+                models = models_response
+            else:
+                models = []
+            
+            for model in models:
+                # Vérifier que le modèle a les clés requises
+                if not isinstance(model, dict) or "id" not in model:
+                    console.print(f"[dim red]Modèle ignoré (format invalide): {model}[/dim red]")
+                    continue
+                    
+                agents_list.append({
+                    "id": f"model-{model['id']}",
+                    "name": model["id"].replace("-", " ").title(),
+                    "model": model["id"],
+                    "agent_type": "model",
+                    "description": f"Modèle {model['id']}",
+                    "tools": [],
+                    "created_at": model.get("created"),
+                })
+                
+        except requests.RequestException as e:
+            console.print(f"[red]❌ Erreur lors de la récupération des modèles:[/red] {e}")
+            if hasattr(e, 'response') and e.response:
+                try:
+                    console.print(f"[dim red]Réponse API: {e.response.text}[/dim red]")
+                except:
+                    pass
+        
+        try:
+            # Récupérer les agents personnalisés (API Beta)
             response = requests.get(
                 "https://api.mistral.ai/v1/agents",
                 headers=headers,
                 timeout=10
             )
             response.raise_for_status()
-            return response.json().get("agents", [])
+            agents_response = response.json()
+            
+            # Gérer les différents formats de réponse API pour les agents
+            if isinstance(agents_response, dict):
+                agents = agents_response.get("data", [])
+            elif isinstance(agents_response, list):
+                agents = agents_response
+            else:
+                agents = []
+            
+            for agent in agents:
+                # Vérifier que l'agent a les clés requises
+                if not isinstance(agent, dict) or "id" not in agent:
+                    console.print(f"[dim yellow]Agent ignoré (format invalide): {agent}[/dim yellow]")
+                    continue
+                    
+                tools_list = [tool.get("type", "") for tool in agent.get("tools", [])]
+                agents_list.append({
+                    "id": agent["id"],
+                    "name": agent.get("name", f"Agent {agent['id'][:8]}"),
+                    "model": agent.get("model", ""),
+                    "agent_type": "agent",
+                    "description": agent.get("description", ""),
+                    "instructions": agent.get("instructions", ""),
+                    "tools": tools_list,
+                    "created_at": agent.get("created_at"),
+                    "version": agent.get("version")
+                })
+                
         except requests.RequestException as e:
-            console.print(f"[red]❌ Erreur API:[/red] {e}")
-            return []
+            console.print(f"[yellow]⚠️ Agents API non disponible (Beta):[/yellow] {e}")
+            if hasattr(e, 'response') and e.response:
+                try:
+                    console.print(f"[dim yellow]Réponse API: {e.response.text}[/dim yellow]")
+                except:
+                    pass
+            
+        return agents_list
 
     def _save_agents(self, agents_data: List[Dict[str, Any]], api_key: str):
         """Sauvegarde les agents avec leur clé API chiffrée."""
         new_agents = []
         for agent_data in agents_data:
-            agent = MistralAgent(
-                id=agent_data["id"],
-                name=agent_data["name"],
-                model=agent_data["model"]
-            )
-            agent.api_key = api_key  # La propriété setter chiffre automatiquement
-            new_agents.append(agent)
+            try:
+                agent = MistralAgent(
+                    id=agent_data["id"],
+                    name=agent_data["name"],
+                    model=agent_data["model"],
+                    agent_type=agent_data.get("agent_type", "model"),
+                    description=agent_data.get("description"),
+                    instructions=agent_data.get("instructions"),
+                    tools=agent_data.get("tools", []),
+                    created_at=agent_data.get("created_at"),
+                    version=agent_data.get("version")
+                )
+                agent.api_key = api_key  # La propriété setter chiffre automatiquement
+                new_agents.append(agent)
+            except Exception as e:
+                console.print(f"[dim red]Erreur lors de la création de l'agent {agent_data.get('id', 'inconnu')}: {e}[/dim red]")
+                console.print(f"[dim red]Données: {agent_data}[/dim red]")
+                continue
 
         existing_agents = load_config(AGENTS_FILE, MistralAgent)
         updated_agents = existing_agents + [
@@ -250,6 +412,138 @@ class MistralChatBot:
         save_config(AGENTS_FILE, updated_agents)
         self.agents = updated_agents
 
+    def _auto_select_first_model(self):
+        """Sélectionne automatiquement le premier modèle disponible."""
+        if not self.agents:
+            return
+            
+        # Chercher le premier modèle dans la liste
+        models = [a for a in self.agents if a.agent_type == "model"]
+        if models:
+            first_model = models[0]
+            self.current_session.context.current_agent = first_model.id
+            
+            console.print(f"\n🎯 [bold cyan]Modèle par défaut sélectionné:[/bold cyan] [cyan]{first_model.name}[/cyan]")
+            console.print(f"   [dim]Vous pouvez changer avec [cyan]/select_agent[/cyan][/dim]")
+
+    def create_custom_agent(self):
+        """Crée un agent personnalisé via l'API Mistral."""
+        if not self.agents:
+            console.print("⚠️ Vous devez d'abord ajouter une clé API avec /add_agent")
+            return
+            
+        # Prendre la clé API du premier agent disponible
+        api_key = next((a.api_key for a in self.agents if a.api_key), None)
+        if not api_key:
+            console.print("⚠️ Aucune clé API disponible")
+            return
+
+        console.print("\n🤖 [bold]Création d'un agent personnalisé[/bold]")
+        
+        # Récupérer les modèles disponibles pour la sélection
+        available_models = [a.model for a in self.agents if a.agent_type == "model"]
+        if not available_models:
+            console.print("⚠️ Aucun modèle disponible")
+            return
+
+        name = Prompt.ask("Nom de l'agent")
+        if not name:
+            return
+
+        description = Prompt.ask("Description de l'agent", default="")
+        instructions = Prompt.ask("Instructions système (optionnel)", default="")
+        
+        # Sélection du modèle de base
+        model = Prompt.ask("Modèle de base", choices=available_models, default=available_models[0])
+        
+        # Sélection des outils
+        available_tools = ["web_search", "code_interpreter", "image_generation"]
+        console.print(f"Outils disponibles: {', '.join(available_tools)}")
+        tools_input = Prompt.ask("Outils à activer (séparés par des virgules)", default="")
+        tools = [t.strip() for t in tools_input.split(",") if t.strip() in available_tools]
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            agent_data = {
+                "model": model,
+                "name": name,
+                "description": description,
+                "instructions": instructions if instructions else None,
+                "tools": [{"type": tool} for tool in tools]
+            }
+            
+            # Retirer les clés None
+            agent_data = {k: v for k, v in agent_data.items() if v is not None}
+
+            with Live(Spinner("dots", text="Création de l'agent..."), console=console):
+                response = requests.post(
+                    "https://api.mistral.ai/v1/agents",
+                    headers=headers,
+                    json=agent_data,
+                    timeout=30
+                )
+                response.raise_for_status()
+
+            result = response.json()
+            
+            # Ajouter le nouvel agent à la liste
+            new_agent = MistralAgent(
+                id=result["id"],
+                name=result.get("name", name),
+                model=result.get("model", model),
+                agent_type="agent",
+                description=result.get("description", description),
+                instructions=result.get("instructions", instructions),
+                tools=[tool.get("type", "") for tool in result.get("tools", [])],
+                created_at=result.get("created_at"),
+                version=result.get("version")
+            )
+            new_agent.api_key = api_key
+            
+            self.agents.append(new_agent)
+            save_config(AGENTS_FILE, self.agents)
+            
+            # Affichage de succès avec style
+            success_text = Text()
+            success_text.append("✅ Agent ", style="bold green")
+            success_text.append(f"'{name}'", style="bold magenta")
+            success_text.append(" créé avec succès!\n\n", style="bold green")
+            success_text.append(f"🏷️ ID: ", style="dim")
+            success_text.append(f"{result['id']}\n", style="cyan")
+            if tools:
+                success_text.append(f"🔧 Outils: ", style="dim")
+                success_text.append(f"{', '.join(tools)}", style="yellow")
+            
+            console.print(Panel.fit(
+                success_text,
+                title="[bold green]🎉 Nouvel Agent Créé[/bold green]",
+                border_style="green",
+                padding=(1, 2)
+            ))
+
+        except requests.RequestException as e:
+            error_text = Text()
+            error_text.append("❌ Erreur lors de la création de l'agent\n\n", style="bold red")
+            error_text.append(f"🔴 {str(e)}\n", style="red")
+            
+            if hasattr(e, 'response') and e.response:
+                try:
+                    error_detail = e.response.json()
+                    error_text.append(f"\n📝 Détails: {error_detail}", style="dim red")
+                except:
+                    error_text.append(f"\n📝 Réponse: {e.response.text}", style="dim red")
+            
+            console.print(Panel.fit(
+                error_text,
+                title="[bold red]⚠️ Erreur API[/bold red]",
+                border_style="red",
+                padding=(1, 2)
+            ))
+
     # --- Gestion des agents Mistral ---
     def list_agents(self):
         """Liste les agents Mistral disponibles."""
@@ -258,24 +552,119 @@ class MistralChatBot:
             return
 
         console.print("\n🤖 [bold]Agents Mistral disponibles:[/bold]")
-        for agent in self.agents:
-            status = "✅" if agent.id == self.current_session.context.current_agent else "   "
-            console.print(f"{status} {agent.name} (Modèle: {agent.model})")
+        
+        # Séparer les modèles et les agents
+        models = [a for a in self.agents if a.agent_type == "model"]
+        agents = [a for a in self.agents if a.agent_type == "agent"]
+        
+        # Liste numérotée pour la cohérence avec select_agent
+        current_number = 1
+        
+        if models:
+            console.print("\n[bold cyan]📚 Modèles disponibles:[/bold cyan]")
+            for model in models:
+                status = "✅" if model.id == self.current_session.context.current_agent else " "
+                console.print(f" {status} {current_number:2d}. [cyan]{model.name}[/cyan] [dim]({model.model})[/dim]")
+                current_number += 1
+        
+        if agents:
+            console.print("\n[bold magenta]🤖 Agents personnalisés:[/bold magenta]")
+            for agent in agents:
+                status = "✅" if agent.id == self.current_session.context.current_agent else " "
+                tools_str = f" [dim yellow]🔧 {', '.join(agent.tools)}[/dim yellow]" if agent.tools else ""
+                console.print(f" {status} {current_number:2d}. [magenta]{agent.name}[/magenta]{tools_str}")
+                if agent.description:
+                    console.print(f"     [dim italic]💭 {agent.description}[/dim italic]")
+                current_number += 1
+        
+        # Statistiques finales et conseil
+        total_count = len(models) + len(agents)
+        console.print(f"\n[dim]📊 Total: {total_count} éléments ({len(models)} modèles, {len(agents)} agents)[/dim]")
+        
+        if total_count > 0:
+            console.print(f"[dim]💡 Utilisez [cyan]/select_agent[/cyan] puis tapez un numéro pour sélectionner rapidement[/dim]")
 
     def select_agent(self):
-        """Sélectionne un agent Mistral pour la session."""
+        """Sélectionne un agent Mistral pour la session avec numérotation."""
         if not self.agents:
             console.print("⚠️ Aucun agent Mistral configuré.")
             return
 
-        choices = [f"{agent.name} ({agent.model})" for agent in self.agents] + ["Annuler"]
-        choice = Prompt.ask("Sélectionnez un agent Mistral", choices=choices)
-
-        if choice != "Annuler":
-            selected_agent_name = choice.split(" (")[0]
-            agent = next(a for a in self.agents if a.name == selected_agent_name)
-            self.current_session.context.current_agent = agent.id
-            console.print(f"🤖 Agent sélectionné: [bold]{agent.name}[/bold] (Modèle: {agent.model})")
+        # Séparer les modèles et les agents
+        models = [a for a in self.agents if a.agent_type == "model"]
+        agents = [a for a in self.agents if a.agent_type == "agent"]
+        
+        # Créer une liste numérotée
+        console.print("\n[bold cyan]🎯 Sélection d'agent/modèle[/bold cyan]")
+        
+        numbered_agents = []
+        current_number = 1
+        
+        if models:
+            console.print(f"\n[bold cyan]📚 Modèles disponibles:[/bold cyan]")
+            for model in models:
+                status = "✅" if model.id == self.current_session.context.current_agent else " "
+                console.print(f" {status} {current_number:2d}. [cyan]{model.name}[/cyan] [dim]({model.model})[/dim]")
+                numbered_agents.append(model)
+                current_number += 1
+        
+        if agents:
+            console.print(f"\n[bold magenta]🤖 Agents personnalisés:[/bold magenta]")
+            for agent in agents:
+                status = "✅" if agent.id == self.current_session.context.current_agent else " "
+                tools_str = f" [dim yellow]🔧 {', '.join(agent.tools[:2])}{'...' if len(agent.tools) > 2 else ''}[/dim yellow]" if agent.tools else ""
+                console.print(f" {status} {current_number:2d}. [magenta]{agent.name}[/magenta]{tools_str}")
+                if agent.description:
+                    console.print(f"     [dim italic]💭 {agent.description}[/dim italic]")
+                numbered_agents.append(agent)
+                current_number += 1
+        
+        console.print(f"\n  0. [red]❌ Annuler[/red]")
+        
+        # Demander le choix par numéro
+        try:
+            choice = Prompt.ask(
+                f"\n[bold]Entrez le numéro de votre choix (0-{len(numbered_agents)})[/bold]",
+                choices=[str(i) for i in range(len(numbered_agents) + 1)]
+            )
+            
+            choice_num = int(choice)
+            
+            if choice_num == 0:
+                console.print("[dim]Sélection annulée.[/dim]")
+                return
+            
+            # Sélectionner l'agent correspondant
+            selected_agent = numbered_agents[choice_num - 1]
+            self.current_session.context.current_agent = selected_agent.id
+            
+            # Affichage de confirmation de sélection
+            if selected_agent.agent_type == "model":
+                selection_text = Text()
+                selection_text.append("📚 Modèle sélectionné: ", style="bold cyan")
+                selection_text.append(f"{selected_agent.name}", style="bold white")
+                console.print(Panel.fit(selection_text, border_style="cyan"))
+            else:
+                selection_text = Text()
+                selection_text.append("🤖 Agent sélectionné: ", style="bold magenta")
+                selection_text.append(f"{selected_agent.name}\n", style="bold white")
+                
+                if selected_agent.description:
+                    selection_text.append(f"\n💭 {selected_agent.description}\n", style="italic")
+                
+                if selected_agent.tools:
+                    selection_text.append(f"\n🔧 Outils actifs: ", style="bold yellow")
+                    selection_text.append(f"{', '.join(selected_agent.tools)}", style="yellow")
+                
+                console.print(Panel.fit(
+                    selection_text,
+                    title="[bold magenta]✨ Agent Actif[/bold magenta]",
+                    border_style="magenta",
+                    padding=(1, 2)
+                ))
+                
+        except (ValueError, IndexError):
+            console.print("[red]❌ Choix invalide.[/red]")
 
     # --- Gestion des serveurs MCP ---
     def display_servers(self):
@@ -487,37 +876,129 @@ class MistralChatBot:
 
     # --- Gestion des sessions ---
     def load_session(self):
-        """Charge une session existante ou en crée une nouvelle."""
-        sessions = []
-        session_files = [f for f in os.listdir("config/sessions") if f.endswith(".json")]
-        for file in session_files:
-            with open(f"config/sessions/{file}", "r", encoding="utf-8") as f:
-                sessions.extend([ChatSession(**s) for s in json.load(f)])
+        """Charge une session existante ou en crée une nouvelle avec interface numérotée."""
+        try:
+            os.makedirs("config/sessions", exist_ok=True)
+            sessions = []
+            session_files = [f for f in os.listdir("config/sessions") if f.endswith(".json")]
+            
+            for file in session_files:
+                try:
+                    with open(f"config/sessions/{file}", "r", encoding="utf-8") as f:
+                        sessions.extend([ChatSession(**s) for s in json.load(f)])
+                except Exception as e:
+                    console.print(f"[dim red]Erreur lors du chargement de {file}: {e}[/dim red]")
+                    continue
 
-        if not sessions:
+            if not sessions:
+                self.current_session = ChatSession(
+                    session_id=datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    context=Context(allowed_dirs=[os.getcwd()])
+                )
+                console.print("✨ [bold cyan]Nouvelle session créée[/bold cyan]")
+                # Sélectionner automatiquement le premier modèle
+                self._auto_select_first_model()
+                return
+
+            # Trier les sessions par date (plus récente en premier)
+            sessions.sort(key=lambda s: s.session_id, reverse=True)
+
+            # Interface de sélection avec numérotation
+            console.print("\n[bold cyan]💾 Sélection de session[/bold cyan]")
+            console.print("\n[bold cyan]📝 Sessions disponibles:[/bold cyan]")
+            
+            for i, session in enumerate(sessions, 1):
+                # Formatter la date pour l'affichage
+                try:
+                    session_date = datetime.strptime(session.session_id, "%Y%m%d_%H%M%S")
+                    formatted_date = session_date.strftime("%d/%m/%Y à %H:%M")
+                except:
+                    formatted_date = session.session_id
+                
+                # Informations sur la session
+                agent_info = ""
+                if session.context.current_agent:
+                    try:
+                        agent = next(a for a in self.agents if a.id == session.context.current_agent)
+                        agent_icon = "📚" if agent.agent_type == "model" else "🤖"
+                        agent_info = f" [dim yellow]{agent_icon} {agent.name}[/dim yellow]"
+                    except:
+                        agent_info = " [dim red]Agent non trouvé[/dim red]"
+                
+                pipeline_info = ""
+                if session.context.default_pipeline:
+                    pipeline_info = f" [dim green]🔧 {session.context.default_pipeline}[/dim green]"
+                
+                # Nombre de messages dans l'historique
+                msg_count = len(session.history)
+                history_info = f" [dim]({msg_count} messages)[/dim]" if msg_count > 0 else " [dim](nouvelle)[/dim]"
+                
+                console.print(f"  {i:2d}. [cyan]{formatted_date}[/cyan]{agent_info}{pipeline_info}{history_info}")
+            
+            console.print(f"\n   0. [green]✨ Nouvelle session[/green]")
+            
+            # Demander le choix
+            try:
+                choice = Prompt.ask(
+                    f"\n[bold]Entrez le numéro de votre choix (0-{len(sessions)})[/bold]",
+                    choices=[str(i) for i in range(len(sessions) + 1)]
+                )
+                
+                choice_num = int(choice)
+                
+                if choice_num == 0:
+                    # Nouvelle session
+                    self.current_session = ChatSession(
+                        session_id=datetime.now().strftime("%Y%m%d_%H%M%S"),
+                        context=Context(allowed_dirs=[os.getcwd()])
+                    )
+                    console.print("✨ [bold cyan]Nouvelle session créée[/bold cyan]")
+                    # Sélectionner automatiquement le premier modèle
+                    self._auto_select_first_model()
+                else:
+                    # Charger session existante
+                    self.current_session = sessions[choice_num - 1]
+                    
+                    # Afficher les informations de la session chargée
+                    session_date = datetime.strptime(self.current_session.session_id, "%Y%m%d_%H%M%S")
+                    formatted_date = session_date.strftime("%d/%m/%Y à %H:%M")
+                    
+                    console.print(f"📂 [bold cyan]Session chargée:[/bold cyan] {formatted_date}")
+                    
+                    if self.current_session.context.current_agent:
+                        try:
+                            agent = next(a for a in self.agents if a.id == self.current_session.context.current_agent)
+                            agent_icon = "📚" if agent.agent_type == "model" else "🤖"
+                            console.print(f"   {agent_icon} Agent actif: [bold]{agent.name}[/bold]")
+                        except:
+                            console.print(f"   [dim red]⚠️ Agent précédent non trouvé, sélection du premier modèle...[/dim red]")
+                            self._auto_select_first_model()
+                    else:
+                        # Aucun agent sélectionné dans cette session, sélectionner le premier modèle
+                        self._auto_select_first_model()
+                    
+                    if self.current_session.context.default_pipeline:
+                        console.print(f"   🔧 Pipeline: [bold]{self.current_session.context.default_pipeline}[/bold]")
+                    
+                    msg_count = len(self.current_session.history)
+                    if msg_count > 0:
+                        console.print(f"   💬 Historique: [dim]{msg_count} messages[/dim]")
+                        
+            except (ValueError, IndexError):
+                console.print("[red]❌ Choix invalide, nouvelle session créée.[/red]")
+                self.current_session = ChatSession(
+                    session_id=datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    context=Context(allowed_dirs=[os.getcwd()])
+                )
+                self._auto_select_first_model()
+                
+        except Exception as e:
+            console.print(f"[red]❌ Erreur lors du chargement des sessions: {e}[/red]")
             self.current_session = ChatSession(
                 session_id=datetime.now().strftime("%Y%m%d_%H%M%S"),
                 context=Context(allowed_dirs=[os.getcwd()])
             )
-            console.print("Nouvelle session créée.")
-            return
-
-        choices = [f"Session {s.session_id}" for s in sessions] + ["Nouvelle session"]
-        choice = Prompt.ask("Charger une session", choices=choices)
-
-        if choice == "Nouvelle session":
-            self.current_session = ChatSession(
-                session_id=datetime.now().strftime("%Y%m%d_%H%M%S"),
-                context=Context(allowed_dirs=[os.getcwd()])
-            )
-        else:
-            session_id = choice.split(" ")[1]
-            self.current_session = next(s for s in sessions if s.session_id == session_id)
-            if self.current_session.context.default_pipeline:
-                console.print(f"Pipeline par défaut: {self.current_session.context.default_pipeline}")
-            if self.current_session.context.current_agent:
-                agent = next(a for a in self.agents if a.id == self.current_session.context.current_agent)
-                console.print(f"Agent Mistral: {agent.name} ({agent.model})")
+            self._auto_select_first_model()
 
     def save_session(self):
         """Sauvegarde la session courante."""
@@ -525,23 +1006,45 @@ class MistralChatBot:
 
     # --- Interface principale ---
     def show_help(self):
-        console.print(
-            "\n[bold]Commandes disponibles:[/bold]\n"
-            "/add_agent      - Ajouter un agent Mistral\n"
-            "/select_agent   - Sélectionner un agent\n"
-            "/list_agents    - Lister les agents\n"
-            "/set_pipeline   - Définir un pipeline par défaut\n"
-            "/servers        - Gérer les serveurs MCP\n"
-            "/pipelines      - Gérer les pipelines\n"
-            "/sessions       - Changer de session\n"
-            "/install-npm    - Installer les outils npm\n"
-            "/help           - Affiche cette aide\n"
-            "/exit           - Quitter\n\n"
-            "Sans commande, votre message est envoyé à l'agent Mistral sélectionné."
-        )
+        help_text = Text()
+        help_text.append("Commandes disponibles:\n\n", style="bold cyan")
+        
+        # Commandes principales
+        commands = [
+            ("/add_agent", "Ajouter des agents/modèles Mistral", "🔗"),
+            ("/create_agent", "Créer un agent personnalisé", "🎨"),
+            ("/select_agent", "Sélectionner un agent/modèle", "🎯"),
+            ("/list_agents", "Lister tous les agents/modèles", "📊"),
+            ("/set_pipeline", "Définir un pipeline par défaut", "🔧"),
+            ("/servers", "Gérer les serveurs MCP", "🌐"),
+            ("/pipelines", "Gérer les pipelines", "⚙️"),
+            ("/sessions", "Changer de session", "📝"),
+            ("/install-npm", "Installer les outils npm", "📦"),
+            ("/help", "Affiche cette aide", "❓"),
+            ("/exit", "Quitter", "🚑")
+        ]
+        
+        for cmd, desc, icon in commands:
+            help_text.append(f"{icon} ", style="")
+            help_text.append(f"{cmd:<15}", style="bold green")
+            help_text.append(f" - {desc}\n", style="white")
+        
+        help_text.append("\n", style="")
+        help_text.append("📚 Modèles", style="bold cyan")
+        help_text.append(" : Chat direct avec les modèles Mistral\n", style="")
+        help_text.append("🤖 Agents", style="bold magenta")
+        help_text.append(" : Agents avec outils intégrés (web search, code, etc.)\n\n", style="")
+        help_text.append("🗨️ Sans commande, votre message est envoyé à l'agent/modèle sélectionné.", style="italic dim")
+        
+        console.print(Panel(
+            help_text,
+            title="[bold blue]📚 Guide d'utilisation[/bold blue]",
+            border_style="blue",
+            padding=(0, 1)
+        ))
 
     def call_mistral_agent(self, prompt: str) -> str:
-        """Appelle l'API Mistral avec l'agent sélectionné."""
+        """Appelle l'API Mistral avec l'agent/modèle sélectionné."""
         if not self.current_session.context.current_agent:
             console.print("⚠️ Aucun agent sélectionné. Utilisez `/select_agent`.")
             return ""
@@ -552,41 +1055,151 @@ class MistralChatBot:
             return ""
 
         try:
-            headers = {"Authorization": f"Bearer {agent.api_key}"}
-            data = {"prompt": prompt, "agent_id": agent.id}
-
-            with Live(Spinner("dots", text="Interrogation de Mistral..."), console=console) as live:
-                response = requests.post(
-                    "https://api.mistral.ai/v1/chat",
-                    headers=headers,
-                    json=data,
-                    timeout=30
-                )
-                response.raise_for_status()
-
-            result = response.json()
-            return result.get("choices", [{}])[0].get("message", {}).get("content", "Réponse vide.")
+            headers = {
+                "Authorization": f"Bearer {agent.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            if agent.agent_type == "agent":
+                # Utiliser l'API Conversations pour les agents personnalisés
+                return self._call_agent_conversation(agent, prompt, headers)
+            else:
+                # Utiliser l'API Chat Completions pour les modèles
+                return self._call_model_completion(agent, prompt, headers)
 
         except requests.RequestException as e:
             console.print(f"❌ Erreur API Mistral: {e}")
             return f"Erreur: {str(e)}"
+    
+    def _call_model_completion(self, agent: MistralAgent, prompt: str, headers: dict) -> str:
+        """Appelle l'API Chat Completions pour un modèle."""
+        data = {
+            "model": agent.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1000,
+            "temperature": 0.7
+        }
 
+        with Live(Spinner("dots", text="Interrogation du modèle Mistral..."), console=console):
+            response = requests.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            response.raise_for_status()
+
+        result = response.json()
+        return result.get("choices", [{}])[0].get("message", {}).get("content", "Réponse vide.")
+    
+    def _call_agent_conversation(self, agent: MistralAgent, prompt: str, headers: dict) -> str:
+        """Appelle l'API Conversations pour un agent personnalisé."""
+        # Créer une nouvelle conversation avec l'agent
+        conversation_data = {
+            "agent_id": agent.id,
+            "inputs": [{"role": "user", "content": prompt}]
+        }
+
+        with Live(Spinner("dots", text=f"Interrogation de l'agent {agent.name}..."), console=console):
+            response = requests.post(
+                "https://api.mistral.ai/v1/agents/completions",
+                headers=headers,
+                json=conversation_data,
+                timeout=30
+            )
+            response.raise_for_status()
+
+        result = response.json()
+        # Extraire la réponse de l'agent
+        choices = result.get("choices", [])
+        if choices:
+            return choices[0].get("message", {}).get("content", "Réponse vide.")
+        
+        # Fallback pour d'autres formats de réponse
+        return result.get("output", "Réponse vide.")
+
+    def _display_session_status(self):
+        """Affiche le statut de la session actuelle."""
+        status_parts = []
+        
+        if self.current_session.context.current_agent:
+            agent = next(a for a in self.agents if a.id == self.current_session.context.current_agent)
+            if agent.agent_type == "model":
+                status_parts.append(f"📚 [cyan]{agent.name}[/cyan]")
+            else:
+                status_parts.append(f"🤖 [green]{agent.name}[/green]")
+                if agent.tools:
+                    status_parts.append(f"🔧 [dim]{', '.join(agent.tools[:2])}[/dim]")
+        else:
+            status_parts.append("⚠️ [red]Aucun agent sélectionné[/red]")
+        
+        if self.current_session.context.default_pipeline:
+            status_parts.append(f"🔧 [yellow]{self.current_session.context.default_pipeline}[/yellow]")
+        
+        status_text = " | ".join(status_parts)
+        console.print(f"\n[dim]Statut: {status_text}[/dim]")
+        console.print("[dim]Tapez [cyan]/help[/cyan] pour voir les commandes disponibles[/dim]\n")
+    
     def start(self):
         """Démarre l'interface conversationnelle."""
-        console.print(Panel.fit("[bold green]🚀 Bienvenue dans Mistral CLI![/bold green]"), style="bold blue")
+        # Affichage de bienvenue amélioré
+        welcome_text = Text()
+        welcome_text.append("🚀 Bienvenue dans ", style="bold cyan")
+        welcome_text.append("Mistral CLI", style="bold magenta")
+        welcome_text.append(" v0.1.0", style="dim cyan")
+        welcome_text.append("\n\n", style="")
+        welcome_text.append("✨ Votre assistant IA avec modèles et agents personnalisés", style="italic blue")
+        
+        console.print(Panel.fit(
+            welcome_text,
+            title="[bold green]🤖 Mistral AI CLI[/bold green]",
+            border_style="cyan",
+            padding=(1, 2)
+        ))
+        
+        # Afficher le statut actuel
+        self._display_session_status()
 
         while True:
             try:
-                user_input = console.input("\n[bold green]Vous>[/bold green] ").strip()
+                # Prompt personnalisé avec informations contextuelles
+                prompt_parts = []
+                
+                # Indicateur d'agent actuel
+                if self.current_session.context.current_agent:
+                    agent = next(a for a in self.agents if a.id == self.current_session.context.current_agent)
+                    if agent.agent_type == "model":
+                        prompt_parts.append(f"[dim cyan]📚 {agent.name}[/dim cyan]")
+                    else:
+                        prompt_parts.append(f"[dim green]🤖 {agent.name}[/dim green]")
+                else:
+                    prompt_parts.append("[dim red]⚠️ Aucun agent[/dim red]")
+                
+                # Pipeline actuel
+                if self.current_session.context.default_pipeline:
+                    prompt_parts.append(f"[dim yellow]🔧 {self.current_session.context.default_pipeline}[/dim yellow]")
+                
+                prompt_text = " | ".join(prompt_parts) + "\n[bold green]🗨️ Vous>[/bold green] "
+                user_input = console.input(prompt_text).strip()
 
                 if not user_input:
                     continue
                 elif user_input.lower() in ["quit", "exit", "/exit"]:
                     self.save_session()
-                    console.print("Au revoir !")
+                    goodbye_text = Text()
+                    goodbye_text.append("👋 Au revoir !", style="bold cyan")
+                    goodbye_text.append("\n\n✨ Merci d'avoir utilisé Mistral CLI", style="italic dim")
+                    console.print(Panel.fit(
+                        goodbye_text,
+                        title="[bold green]🎆 À bientôt ![/bold green]",
+                        border_style="green",
+                        padding=(1, 2)
+                    ))
                     break
                 elif user_input.lower() == "/add_agent":
                     self._authenticate()
+                elif user_input.lower() == "/create_agent":
+                    self.create_custom_agent()
                 elif user_input.lower() == "/select_agent":
                     self.select_agent()
                 elif user_input.lower() == "/list_agents":
@@ -605,23 +1218,92 @@ class MistralChatBot:
                     install_npm_tools()
                 elif user_input.lower() == "/help":
                     self.show_help()
+                    # Afficher aussi le statut actuel après l'aide
+                    self._display_session_status()
                 elif self.current_session.context.current_agent and not user_input.startswith("/"):
                     response = self.call_mistral_agent(user_input)
-                    console.print(f"\n[bold cyan]Mistral>[/bold cyan] {response}")
+                    
+                    # Affichage de la réponse avec formatting amélioré
+                    agent = next(a for a in self.agents if a.id == self.current_session.context.current_agent)
+                    if agent.agent_type == "model":
+                        header = f"[bold cyan]📚 {agent.name}>[/bold cyan]"
+                    else:
+                        header = f"[bold magenta]🤖 {agent.name}>[/bold magenta]"
+                    
+                    # Afficher la réponse dans un panel si elle est longue
+                    if len(response) > 200:
+                        console.print(f"\n{header}")
+                        console.print(Panel(
+                            Markdown(response),
+                            border_style="cyan" if agent.agent_type == "model" else "magenta",
+                            padding=(0, 1)
+                        ))
+                    else:
+                        console.print(f"\n{header} {response}")
                 elif self.current_session.context.default_pipeline:
                     self.execute_pipeline(self.current_session.context.default_pipeline, user_input)
                 else:
-                    console.print(
-                        "⚠️ Aucun agent Mistral ou pipeline sélectionné. "
-                        "Utilisez `/select_agent` ou `/set_pipeline`."
-                    )
+                    console.print(Panel.fit(
+                        "⚠️ [bold yellow]Aucun agent ou pipeline sélectionné[/bold yellow]\n\n"
+                        "🔹 Utilisez [cyan]/select_agent[/cyan] pour choisir un modèle/agent\n"
+                        "🔹 Ou [cyan]/create_agent[/cyan] pour créer un agent personnalisé\n"
+                        "🔹 Ou [cyan]/set_pipeline[/cyan] pour définir un pipeline",
+                        border_style="yellow",
+                        title="[bold yellow]🎆 Action requise[/bold yellow]"
+                    ))
             except KeyboardInterrupt:
-                console.print("\nOpération annulée.")
+                console.print("\n[yellow]⏸️ Opération annulée[/yellow]")
             except Exception as e:
-                console.print(f"[red]❌ Erreur:[/red] {e}")
+                error_panel = Panel.fit(
+                    f"❌ [bold red]Erreur inattendue[/bold red]\n\n🔴 {str(e)}",
+                    border_style="red",
+                    title="[red]⚠️ Exception[/red]"
+                )
+                console.print(error_panel)
 
 # --- Point d'entrée ---
-if __name__ == "__main__":
+def main():
+    """Point d'entrée principal de l'application."""
+    import sys
+    
+    # Gérer les arguments de ligne de commande
+    if len(sys.argv) > 1:
+        arg = sys.argv[1]
+        if arg in ['--help', '-h']:
+            print("""
+🤖 Mistral CLI v0.1.0 - Assistant IA avec modèles et agents personnalisés
+
+Usage: mistral-cli [options]
+
+Options:
+  -h, --help     Affiche cette aide
+  --version      Affiche la version
+
+Fonctionnalités:
+  📚 Modèles Mistral - Chat direct avec les modèles
+  🤖 Agents personnalisés - Agents avec outils intégrés
+  🔧 Outils de développement multi-langages
+  💾 Sessions persistantes
+  🔒 Chiffrement des clés API
+
+Pour commencer:
+  1. Lancez 'mistral-cli' 
+  2. Entrez votre clé API Mistral (https://mistral.ai)
+  3. Sélectionnez un agent ou créez-en un nouveau
+
+Commandes disponibles dans l'interface:
+  /create_agent  - Créer un agent avec outils
+  /list_agents   - Voir tous les agents disponibles
+  /help         - Aide complète
+            """)
+            return
+        elif arg in ['--version', '-v']:
+            print("mistral-cli 0.1.0")
+            return
+    
     os.makedirs("config/sessions", exist_ok=True)
     bot = MistralChatBot()
     bot.start()
+
+if __name__ == "__main__":
+    main()
