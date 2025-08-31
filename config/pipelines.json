@@ -1,0 +1,41 @@
+[
+  {
+    "name": "file-analysis",
+    "steps": [
+      {
+        "step_type": "python",
+        "server": "file_analyzer/file_reader",
+        "action": "analyze",
+        "params": {
+          "analysis_type": "general"
+        }
+      }
+    ]
+  },
+  {
+    "name": "security-audit",
+    "steps": [
+      {
+        "step_type": "python",
+        "server": "file_analyzer/file_reader",
+        "action": "analyze",
+        "params": {
+          "analysis_type": "security"
+        }
+      }
+    ]
+  },
+  {
+    "name": "code-optimization",
+    "steps": [
+      {
+        "step_type": "python",
+        "server": "file_analyzer/file_reader",
+        "action": "analyze",
+        "params": {
+          "analysis_type": "optimization"
+        }
+      }
+    ]
+  }
+]

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import fnmatch
 from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 from datetime import datetime
@@ -1015,6 +1016,9 @@ class MistralChatBot:
             ("/create_agent", "Créer un agent personnalisé", "🎨"),
             ("/select_agent", "Sélectionner un agent/modèle", "🎯"),
             ("/list_agents", "Lister tous les agents/modèles", "📊"),
+            ("/analyze_file", "Analyser un fichier avec Mistral AI", "🔍"),
+            ("/analyze_batch", "Analyser plusieurs fichiers par lots", "📁"),
+            ("/execute_command", "Exécuter un ordre sur un dossier entier", "⚡"),
             ("/set_pipeline", "Définir un pipeline par défaut", "🔧"),
             ("/servers", "Gérer les serveurs MCP", "🌐"),
             ("/pipelines", "Gérer les pipelines", "⚙️"),
@@ -1139,6 +1143,330 @@ class MistralChatBot:
         status_text = " | ".join(status_parts)
         console.print(f"\n[dim]Statut: {status_text}[/dim]")
         console.print("[dim]Tapez [cyan]/help[/cyan] pour voir les commandes disponibles[/dim]\n")
+
+    def analyze_file(self):
+        """Analyse un fichier unique avec Mistral AI."""
+        if not self.agents:
+            console.print("⚠️ Vous devez d'abord ajouter une clé API avec /add_agent")
+            return
+        
+        # Prendre la clé API du premier agent disponible
+        api_key = next((a.api_key for a in self.agents if a.api_key), None)
+        if not api_key:
+            console.print("⚠️ Aucune clé API disponible")
+            return
+        
+        console.print("\n🔍 [bold]Analyse de fichier avec Mistral AI[/bold]")
+        
+        # Demander le chemin du fichier
+        file_path = Prompt.ask("Chemin du fichier à analyser")
+        if not file_path or not os.path.exists(file_path):
+            console.print("❌ Fichier inexistant ou chemin invalide.")
+            return
+        
+        # Type d'analyse
+        analysis_types = ["general", "security", "optimization", "documentation", "refactor", "bugs", "style"]
+        analysis_type = Prompt.ask(
+            "Type d'analyse", 
+            choices=analysis_types, 
+            default="general"
+        )
+        
+        # Demander si on applique les améliorations
+        apply_improvements = Confirm.ask("Appliquer automatiquement les améliorations suggérées ?", default=False)
+        
+        try:
+            from mistral_cli.tools.file_analyzer.file_reader import FileAnalyzer
+            
+            with Live(Spinner("dots", text="Analyse en cours..."), console=console):
+                analyzer = FileAnalyzer(api_key)
+                
+                # Lire le fichier
+                content = analyzer.read_file_content(file_path)
+                if content.startswith("Erreur"):
+                    console.print(f"❌ {content}")
+                    return
+                
+                # Analyser
+                analysis = analyzer.analyze_with_mistral(content, analysis_type)
+                suggestions = analyzer.generate_improvements(content, analysis)
+                
+                # Appliquer les améliorations si demandé
+                applied = False
+                if apply_improvements:
+                    applied = analyzer.apply_suggestions(file_path, content, suggestions)
+            
+            # Afficher les résultats
+            console.print(f"\n📄 [bold cyan]Fichier analysé:[/bold cyan] {file_path}")
+            console.print(f"🔍 [bold]Type d'analyse:[/bold] {analysis_type}")
+            
+            console.print("\n[bold green]📋 ANALYSE:[/bold green]")
+            console.print(Panel(Markdown(analysis), border_style="green"))
+            
+            console.print("\n[bold yellow]💡 SUGGESTIONS:[/bold yellow]")
+            console.print(Panel(Markdown(suggestions), border_style="yellow"))
+            
+            if apply_improvements:
+                if applied:
+                    console.print("\n✅ [bold green]Améliorations appliquées avec succès ![/bold green]")
+                    console.print(f"📁 Backup créé: {file_path}.backup")
+                else:
+                    console.print("\n❌ [bold red]Échec de l'application des améliorations.[/bold red]")
+            
+        except ImportError:
+            console.print("❌ Module d'analyse de fichier non trouvé.")
+        except Exception as e:
+            console.print(f"❌ Erreur lors de l'analyse: {str(e)}")
+
+    def analyze_batch(self):
+        """Analyse par lots de fichiers avec Mistral AI."""
+        if not self.agents:
+            console.print("⚠️ Vous devez d'abord ajouter une clé API avec /add_agent")
+            return
+        
+        # Prendre la clé API du premier agent disponible
+        api_key = next((a.api_key for a in self.agents if a.api_key), None)
+        if not api_key:
+            console.print("⚠️ Aucune clé API disponible")
+            return
+        
+        console.print("\n📁 [bold]Analyse par lots avec Mistral AI[/bold]")
+        
+        # Demander le répertoire
+        directory = Prompt.ask("Répertoire à analyser", default=".")
+        if not os.path.exists(directory):
+            console.print("❌ Répertoire inexistant.")
+            return
+        
+        # Patterns de fichiers
+        console.print("Patterns de fichiers (séparés par des virgules):")
+        console.print("Exemples: *.py,*.js,*.ts,*.java,*.go,*.php,*.rb,*.rs")
+        patterns_input = Prompt.ask("Patterns", default="*.py,*.js,*.ts")
+        patterns = [p.strip() for p in patterns_input.split(",")]
+        
+        # Type d'analyse
+        analysis_types = ["general", "security", "optimization", "documentation", "refactor", "bugs", "style"]
+        analysis_type = Prompt.ask(
+            "Type d'analyse", 
+            choices=analysis_types, 
+            default="general"
+        )
+        
+        # Options avancées
+        recursive = Confirm.ask("Analyse récursive des sous-répertoires ?", default=True)
+        apply_improvements = Confirm.ask("Appliquer automatiquement les améliorations ?", default=False)
+        max_file_size = int(Prompt.ask("Taille max par fichier (bytes)", default="100000"))
+        
+        try:
+            from mistral_cli.tools.file_analyzer.batch_processor import execute
+            
+            # Préparer le contexte
+            context = Context()
+            context.data = {
+                "directory": directory,
+                "patterns": patterns,
+                "analysis_type": analysis_type,
+                "recursive": recursive,
+                "apply_improvements": apply_improvements,
+                "max_file_size": max_file_size,
+                "api_key": api_key
+            }
+            
+            with Live(Spinner("dots", text="Analyse par lots en cours..."), console=console):
+                result_context = execute(context)
+            
+            # Afficher les résultats
+            output_data = json.loads(result_context.data["output"])
+            
+            console.print(f"\n📊 [bold cyan]RÉSULTATS DE L'ANALYSE PAR LOTS[/bold cyan]")
+            console.print(f"📁 Répertoire: {directory}")
+            console.print(f"🔍 Type: {analysis_type}")
+            console.print(f"📄 Fichiers trouvés: {output_data['total_files_found']}")
+            console.print(f"✅ Fichiers traités: {output_data['files_processed']}")
+            console.print(f"❌ Erreurs: {output_data['files_with_errors']}")
+            
+            if output_data.get('summary'):
+                console.print("\n[bold green]📋 RÉSUMÉ:[/bold green]")
+                console.print(Panel(output_data['summary'], border_style="green"))
+            
+            if output_data.get('errors'):
+                console.print("\n[bold red]⚠️ ERREURS:[/bold red]")
+                for error in output_data['errors'][:5]:
+                    console.print(f"• {error}")
+            
+            # Sauvegarder le rapport détaillé
+            report_file = f"analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(report_file, 'w', encoding='utf-8') as f:
+                json.dump(output_data, f, indent=2, ensure_ascii=False)
+            
+            console.print(f"\n💾 [bold blue]Rapport détaillé sauvegardé:[/bold blue] {report_file}")
+            
+        except ImportError:
+            console.print("❌ Module d'analyse par lots non trouvé.")
+        except Exception as e:
+            console.print(f"❌ Erreur lors de l'analyse par lots: {str(e)}")
+
+    def execute_command_on_folder(self):
+        """Exécute un ordre en langage naturel sur un dossier entier et ses sous-dossiers."""
+        if not self.agents:
+            console.print("⚠️ Vous devez d'abord ajouter une clé API avec /add_agent")
+            return
+        
+        # Prendre la clé API du premier agent disponible
+        api_key = next((a.api_key for a in self.agents if a.api_key), None)
+        if not api_key:
+            console.print("⚠️ Aucune clé API disponible")
+            return
+        
+        console.print("\n🗣️ [bold]Exécution d'ordre en langage naturel sur dossier[/bold]")
+        
+        # Afficher des exemples d'ordres
+        console.print("\n[bold cyan]💡 Exemples d'ordres en langage naturel:[/bold cyan]")
+        examples = [
+            "Ajoute des commentaires détaillés partout dans le code",
+            "Rends ce code plus sûr en ajoutant des validations",
+            "Améliore les performances de tous ces fichiers", 
+            "Modernise le code avec les dernières pratiques",
+            "Ajoute une gestion d'erreurs robuste",
+            "Traduis tous les commentaires en français",
+            "Génère des tests unitaires pour chaque fonction",
+            "Optimise l'utilisation mémoire",
+            "Applique les principes du Clean Code",
+            "Convertis le code en utilisant les dernières fonctionnalités du langage"
+        ]
+        
+        for i, example in enumerate(examples, 1):
+            console.print(f"  {i:2d}. [dim italic]« {example} »[/dim italic]")
+        
+        console.print("\n[bold yellow]📝 Entrez votre ordre en français (soyez précis sur ce que vous voulez):[/bold yellow]")
+        
+        # Demander l'ordre en langage naturel
+        natural_command = console.input("[bold green]🗨️ Votre ordre>[/bold green] ").strip()
+        
+        if not natural_command:
+            console.print("❌ Ordre requis.")
+            return
+            
+        console.print(f"\n[dim]💭 Ordre reçu: « {natural_command} »[/dim]")
+        
+        # Configuration
+        folder_path = Prompt.ask("Dossier à traiter", default=".")
+        if not os.path.exists(folder_path):
+            console.print("❌ Dossier inexistant.")
+            return
+        
+        # Patterns de fichiers
+        console.print("\n[dim]Patterns de fichiers (séparés par des virgules):[/dim]")
+        console.print("[dim]Exemples: *.py,*.js,*.ts,*.java,*.go,*.php,*.rb,*.rs[/dim]")
+        patterns_input = Prompt.ask("Patterns", default="*.py,*.js,*.ts,*.java")
+        patterns = [p.strip() for p in patterns_input.split(",")]
+        
+        # Options avancées
+        recursive = Confirm.ask("Analyse récursive des sous-répertoires ?", default=True)
+        
+        # Prévisualisation
+        files_found = []
+        if recursive:
+            for root, dirs, files in os.walk(folder_path):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in [
+                    'node_modules', 'build', 'dist', '__pycache__', 'target'
+                ]]
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    if any(fnmatch.fnmatch(file, pattern) for pattern in patterns):
+                        files_found.append(file_path)
+        else:
+            for file in os.listdir(folder_path):
+                file_path = os.path.join(folder_path, file)
+                if os.path.isfile(file_path) and any(fnmatch.fnmatch(file, pattern) for pattern in patterns):
+                    files_found.append(file_path)
+        
+        console.print(f"\n📊 [bold]Prévisualisation:[/bold]")
+        console.print(f"📁 Dossier: {folder_path}")
+        console.print(f"🗣️ Ordre: « {natural_command} »")
+        console.print(f"📄 Fichiers trouvés: {len(files_found)}")
+        
+        if len(files_found) <= 10:
+            for file_path in files_found:
+                console.print(f"   • {file_path}")
+        else:
+            for file_path in files_found[:5]:
+                console.print(f"   • {file_path}")
+            console.print(f"   ... et {len(files_found)-5} autres fichiers")
+        
+        if not files_found:
+            console.print("⚠️ Aucun fichier trouvé avec ces patterns.")
+            return
+        
+        # Confirmation
+        if not Confirm.ask(f"\n[bold yellow]Continuer avec le traitement de {len(files_found)} fichiers ?[/bold yellow]"):
+            console.print("Opération annulée.")
+            return
+        
+        apply_changes = Confirm.ask("Appliquer automatiquement les modifications ?", default=False)
+        max_file_size = int(Prompt.ask("Taille max par fichier (bytes)", default="100000"))
+        
+        # Exécution avec le nouveau système de langage naturel
+        try:
+            console.print(f"\n🧠 [bold green]Démarrage de l'interprétation et exécution...[/bold green]")
+            
+            with Live(Spinner("dots", text="Interprétation et exécution en cours..."), console=console):
+                # Préparer le contexte pour le système de langage naturel
+                context = Context()
+                context.data = {
+                    "folder_path": folder_path,
+                    "natural_command": natural_command,
+                    "patterns": patterns,
+                    "recursive": recursive,
+                    "apply_changes": apply_changes,
+                    "max_file_size": max_file_size,
+                    "api_key": api_key
+                }
+                
+                from mistral_cli.tools.file_analyzer.natural_language_executor import execute
+                result_context = execute(context)
+            
+            # Afficher les résultats
+            try:
+                output_data = json.loads(result_context.data["output"])
+                
+                console.print(f"\n✅ [bold green]EXÉCUTION TERMINÉE[/bold green]")
+                console.print(f"🗣️ Ordre: « {natural_command} »")
+                console.print(f"📁 Dossier: {folder_path}")
+                console.print(f"📄 Fichiers trouvés: {output_data.get('total_files_found', 0)}")
+                console.print(f"✅ Fichiers traités: {output_data.get('files_processed', 0)}")
+                console.print(f"🔄 Fichiers modifiés: {output_data.get('files_changed', 0)}")
+                console.print(f"⏭️ Fichiers ignorés: {output_data.get('files_skipped', 0)}")
+                console.print(f"❌ Erreurs: {output_data.get('errors_count', 0)}")
+                
+                if output_data.get('summary'):
+                    console.print("\n[bold green]📋 RAPPORT DÉTAILLÉ:[/bold green]")
+                    console.print(Panel(output_data['summary'], border_style="green"))
+                
+                if output_data.get('errors'):
+                    console.print("\n[bold red]⚠️ ERREURS:[/bold red]")
+                    for error in output_data['errors']:
+                        console.print(f"• {error}")
+                
+                # Sauvegarder le rapport
+                report_file = f"natural_language_execution_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                with open(report_file, 'w', encoding='utf-8') as f:
+                    json.dump(output_data, f, indent=2, ensure_ascii=False)
+                
+                console.print(f"\n💾 [bold blue]Rapport détaillé sauvegardé:[/bold blue] {report_file}")
+                
+                if apply_changes and output_data.get('files_changed', 0) > 0:
+                    console.print(f"\n🔄 [bold yellow]MODIFICATIONS APPLIQUÉES[/bold yellow]")
+                    console.print(f"📁 Les fichiers originaux sont sauvegardés avec l'extension .backup")
+                    console.print(f"⚠️ Vérifiez les modifications avant de supprimer les backups")
+                
+            except json.JSONDecodeError:
+                console.print(f"❌ Erreur lors du parsing des résultats: {result_context.data['output']}")
+                
+        except ImportError:
+            console.print("❌ Module d'exécution en langage naturel non trouvé.")
+        except Exception as e:
+            console.print(f"❌ Erreur lors de l'exécution: {str(e)}")
     
     def start(self):
         """Démarre l'interface conversationnelle."""
@@ -1214,6 +1542,12 @@ class MistralChatBot:
                         self.set_default_pipeline()
                 elif user_input.lower() == "/sessions":
                     self.load_session()
+                elif user_input.lower() == "/analyze_file":
+                    self.analyze_file()
+                elif user_input.lower() == "/analyze_batch":
+                    self.analyze_batch()
+                elif user_input.lower() == "/execute_command":
+                    self.execute_command_on_folder()
                 elif user_input.lower() == "/install-npm":
                     install_npm_tools()
                 elif user_input.lower() == "/help":

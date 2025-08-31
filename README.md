@@ -73,12 +73,119 @@ mistral-cli
 - `/add_agent` - Ajouter des modèles/agents Mistral
 - `/create_agent` - Créer un agent personnalisé avec outils
 - `/select_agent` - Sélectionner un modèle/agent
-- `/list_agents` - Lister tous les modèles et agents  
+- `/list_agents` - Lister tous les modèles et agents
+- `/analyze_file` - Analyser un fichier avec Mistral AI
+- `/analyze_batch` - Analyser plusieurs fichiers par lots
+- `/execute_command` - Exécuter un ordre sur un dossier entier
 - `/set_pipeline` - Définir un pipeline par défaut
 - `/servers` - Gérer les serveurs MCP
 - `/sessions` - Changer de session
 - `/help` - Afficher l'aide
 - `/exit` - Quitter
+
+### Analyse de fichiers avec Mistral AI
+
+La nouvelle fonctionnalité d'analyse de fichiers permet d'utiliser l'API Mistral pour analyser et améliorer automatiquement votre code.
+
+#### Analyse d'un fichier unique
+
+```bash
+# Dans l'interface Mistral CLI
+/analyze_file
+
+# Entrez le chemin du fichier
+Chemin du fichier à analyser: ./example.py
+
+# Choisissez le type d'analyse
+Type d'analyse (general/security/optimization/documentation/refactor/bugs/style): security
+
+# Appliquer les améliorations automatiquement ?
+Appliquer automatiquement les améliorations suggérées ? (y/n): n
+```
+
+#### Analyse par lots
+
+```bash
+# Analyser plusieurs fichiers d'un répertoire
+/analyze_batch
+
+# Configuration
+Répertoire à analyser: ./src
+Patterns: *.py,*.js,*.ts
+Type d'analyse: optimization
+Analyse récursive des sous-répertoires ? (y/n): y
+Appliquer automatiquement les améliorations ? (y/n): n
+```
+
+#### Exécution d'ordres en langage naturel sur dossier complet
+
+```bash
+# Exécuter un ordre en français naturel sur un dossier entier
+/execute_command
+
+# Exemples d'ordres en langage naturel:
+💡 Exemples d'ordres en langage naturel:
+  1. « Ajoute des commentaires détaillés partout dans le code »
+  2. « Rends ce code plus sûr en ajoutant des validations »
+  3. « Améliore les performances de tous ces fichiers »
+  4. « Modernise le code avec les dernières pratiques »
+  5. « Ajoute une gestion d'erreurs robuste »
+  6. « Traduis tous les commentaires en français »
+  7. « Génère des tests unitaires pour chaque fonction »
+  8. « Applique les principes du Clean Code »
+
+📝 Entrez votre ordre en français (soyez précis):
+🗨️ Votre ordre> Ajoute une documentation complète avec des exemples
+
+# Configuration
+Dossier à traiter: ./src
+Patterns: *.py,*.js,*.java
+Appliquer automatiquement les modifications ? (y/n): y
+```
+
+#### Types d'analyse disponibles
+
+- **general** : Analyse générale avec suggestions d'amélioration
+- **security** : Détection de vulnérabilités et failles de sécurité
+- **optimization** : Suggestions d'optimisation de performance
+- **documentation** : Amélioration de la documentation et commentaires
+- **refactor** : Suggestions de refactorisation du code
+- **bugs** : Détection de bugs potentiels et erreurs de logique
+- **style** : Vérification des conventions de style et bonnes pratiques
+
+#### Ordres en langage naturel
+
+Le système interprète vos demandes en français et les applique intelligemment :
+
+**📚 Documentation :**
+- « Ajoute des commentaires détaillés partout dans le code »
+- « Génère une documentation complète pour toutes les fonctions »
+- « Écris des docstrings explicatives pour chaque méthode »
+
+**🔒 Sécurité :**
+- « Rends ce code plus sûr en ajoutant des validations »
+- « Corrige toutes les vulnérabilités de sécurité »
+- « Protège le code contre les attaques courantes »
+
+**⚡ Performance :**
+- « Améliore les performances de tous ces fichiers »
+- « Optimise l'utilisation mémoire »
+- « Rends les algorithmes plus efficaces »
+
+**🧹 Clean Code :**
+- « Applique les principes du Clean Code »
+- « Refactorise pour une meilleure maintenabilité »
+- « Élimine le code dupliqué »
+
+**🆕 Modernisation :**
+- « Modernise le code avec les dernières pratiques »
+- « Convertis le code en utilisant les dernières fonctionnalités »
+- « Remplace le code déprécié par les alternatives modernes »
+
+**🌍 Personnalisé :**
+- « Traduis tous les commentaires en français »
+- « Convertis les fonctions en classes »
+- « Remplace print() par logging »
 
 ### Exemple d'utilisation
 
@@ -87,11 +194,16 @@ Vous> Peux-tu analyser ce code JavaScript et suggérer des améliorations ?
 
 Mistral> Je vais analyser votre code JavaScript. Pouvez-vous me montrer le code ?
 
-Vous> /set_pipeline js-analysis
+Vous> /analyze_file
 
-✅ Pipeline par défaut: js-analysis
+📄 Fichier analysé: ./app.js
+🔍 Type d'analyse: security
 
-Vous> [Votre code JavaScript ici]
+📋 ANALYSE:
+[Rapport détaillé de l'analyse...]
+
+💡 SUGGESTIONS:
+[Suggestions d'amélioration...]
 ```
 
 ## Configuration
